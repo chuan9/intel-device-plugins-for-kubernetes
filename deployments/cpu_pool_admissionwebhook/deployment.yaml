@@ -1,0 +1,33 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: intel-cpu-pool-webhook-deployment
+  labels:
+    app: intel-cpu-pool-webhook
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: intel-cpu-pool-webhook
+    spec:
+      containers:
+        - name: cpu-pool-mutator
+          image: intel-cpu-pool-admissionwebhook:devel
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/bin/intel_cpu_pool_admissionwebhook
+          args:
+            - -tls-cert-file=/etc/webhook/certs/cert.pem
+            - -tls-private-key-file=/etc/webhook/certs/key.pem
+            - -alsologtostderr
+            - -v=2
+            - 2>&1
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: intel-cpu-pool-webhook-certs

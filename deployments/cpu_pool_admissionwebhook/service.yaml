@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: intel-cpu-pool-webhook-svc
+  labels:
+    app: intel-cpu-pool-webhook
+spec:
+  ports:
+  - port: 443
+    targetPort: 443
+  selector:
+    app: intel-cpu-pool-webhook

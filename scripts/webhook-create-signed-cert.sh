@@ -101,8 +101,7 @@ echo ${serverCert} | base64 --decode > ${tmpdir}/server-cert.pem
 ${kubectl} create secret generic ${secret} \
         --from-file=key.pem=${tmpdir}/server-key.pem \
         --from-file=cert.pem=${tmpdir}/server-cert.pem \
-        --dry-run -o yaml |
-    ${kubectl} -n ${namespace} apply -f -
+        -n "${namespace}"
 
 echo "Removing ${tmpdir}"
 rm -rf ${tmpdir}
