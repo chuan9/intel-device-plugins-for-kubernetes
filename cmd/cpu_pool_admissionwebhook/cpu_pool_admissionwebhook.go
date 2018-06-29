@@ -71,7 +71,6 @@ func addToScheme(scheme *runtime.Scheme) {
 	admissionregistrationv1beta1.AddToScheme(scheme)
 }
 
-// TODO: get rid of hardcoded translations of FPGA resource names to region interface IDs
 func getTLSConfig(certFile string, keyFile string) *tls.Config {
 	sCert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
@@ -152,9 +151,14 @@ func validatePoolResource(c *corev1.Container, request *poolResource, limit *poo
 
 func addPoolResourceRequestOrLimit(c *corev1.Container, request bool) (*poolResource, error) {
 	var pool, cpu *resource.Quantity = nil, nil
+	list := c.Resources.Limits
 
-	if c.Resources.Requests == nil {
+	if (request && c.Resources.Requests == nil) || (!request && c.Resources.Limits == nil) {
 		return nil, nil
+	}
+
+	if request {
+		list = c.Resources.Requests
 	}
 
 	//
@@ -165,11 +169,11 @@ func addPoolResourceRequestOrLimit(c *corev1.Container, request bool) (*poolReso
 	// - if native present, add corresponding default pool
 	//
 
-	if res, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+	if res, ok := list[corev1.ResourceCPU]; ok {
 		cpu = &res
 	}
 
-	for name, res := range c.Resources.Requests {
+	for name, res := range list {
 		if strings.HasPrefix(name.String(), resourcePrefix) {
 			pool = &res
 			break
@@ -177,12 +181,12 @@ func addPoolResourceRequestOrLimit(c *corev1.Container, request bool) (*poolReso
 	}
 
 	if cpu != nil && pool != nil {
-		// both native and pool CPU request found
+		// both native and pool CPU request/limit found
 		return nil, nil
 	}
 
 	if pool != nil {
-		// only pool CPU request, add native
+		// only pool CPU request/limit, add native
 		val := pool.Value()
 		cpu = resource.NewMilliQuantity(val, resource.DecimalSI)
 
@@ -192,7 +196,7 @@ func addPoolResourceRequestOrLimit(c *corev1.Container, request bool) (*poolReso
 		}, nil
 	}
 
-	// only native CPU request, add 'default' pool one
+	// only native CPU request/limit, add 'default' pool one
 	val := cpu.MilliValue()
 	pool = resource.NewQuantity(val, resource.DecimalSI)
 	name := corev1.ResourceName(resourcePrefix + defaultPool)
@@ -219,15 +223,25 @@ func addPoolResource(c *corev1.Container) (*poolResource, *poolResource, error) 
 	return request, limit, nil
 }
 
+func createOp(res *poolResource, i int, resourceType string, target string) string {
+	resourceName := "cpu"
+
+	if !res.system {
+		resourceName = resourcePrefix + res.pool.String()
+	}
+
+	return fmt.Sprintf(addResourceOp, target, i, resourceType, resourceName, res.quantity.String())
+}
+
 func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	var containerOps, initContainerOps, ops []string
+	var ops []string
 
 	glog.V(2).Info("mutating pods")
 
 	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
 	if ar.Request.Resource != podResource {
 		glog.Errorf("expect resource to be %s", podResource)
-		return nil
+		return toAdmissionResponse(fmt.Errorf("wrong resource type (%s, expected %s)", ar.Request.Resource, podResource))
 	}
 
 	raw := ar.Request.Object.Raw
@@ -240,8 +254,10 @@ func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 	reviewResponse := v1beta1.AdmissionResponse{}
 	reviewResponse.Allowed = true
 
+	glog.V(2).Info("pod namespace: " + pod.ObjectMeta.GetNamespace())
+
 	// leave system-pods alone, they're supposed to have enough reserved CPU on each node
-	if pod.ObjectMeta.Namespace == metav1.NamespaceSystem {
+	if pod.ObjectMeta.GetNamespace() == metav1.NamespaceSystem {
 		return &reviewResponse
 	}
 
@@ -251,27 +267,10 @@ func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 			return toAdmissionResponse(err)
 		}
 		if request != nil {
-			if request.system {
-				op := fmt.Sprintf(addResourceOp, "initcontainers", i, "requests", "cpu", request.quantity.String())
-				initContainerOps = append(initContainerOps, op)
-			} else {
-				resourceName := resourcePrefix + request.pool.String()
-				op := fmt.Sprintf(addResourceOp, "initcontainers", i, "requests", resourceName, request.quantity.String())
-				initContainerOps = append(initContainerOps, op)
-			}
-			if err := validatePoolResource(&pod.Spec.InitContainers[i], request, limit); err != nil {
-				return toAdmissionResponse(err)
-			}
+			ops = append(ops, createOp(request, i, "requests", "initcontainers"))
 		}
 		if limit != nil {
-			if limit.system {
-				op := fmt.Sprintf(addResourceOp, "initcontainers", i, "limits", "cpu", request.quantity.String())
-				containerOps = append(initContainerOps, op)
-			} else {
-				resourceName := resourcePrefix + request.pool.String()
-				op := fmt.Sprintf(addResourceOp, "initcontainers", i, "limits", resourceName, request.quantity.String())
-				containerOps = append(initContainerOps, op)
-			}
+			ops = append(ops, createOp(limit, i, "limits", "initcontainers"))
 		}
 		if err := validatePoolResource(&pod.Spec.InitContainers[i], request, limit); err != nil {
 			return toAdmissionResponse(err)
@@ -284,34 +283,20 @@ func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 			return toAdmissionResponse(err)
 		}
 		if request != nil {
-			if request.system {
-				op := fmt.Sprintf(addResourceOp, "containers", i, "requests", "cpu", request.quantity.String())
-				containerOps = append(containerOps, op)
-			} else {
-				resourceName := resourcePrefix + request.pool.String()
-				op := fmt.Sprintf(addResourceOp, "containers", i, "requests", resourceName, request.quantity.String())
-				containerOps = append(containerOps, op)
-			}
+			ops = append(ops, createOp(request, i, "requests", "containers"))
 		}
 		if limit != nil {
-			if limit.system {
-				op := fmt.Sprintf(addResourceOp, "containers", i, "limits", "cpu", request.quantity.String())
-				containerOps = append(containerOps, op)
-			} else {
-				resourceName := resourcePrefix + request.pool.String()
-				op := fmt.Sprintf(addResourceOp, "containers", i, "limits", resourceName, request.quantity.String())
-				containerOps = append(containerOps, op)
-			}
+			ops = append(ops, createOp(limit, i, "limits", "containers"))
 		}
 		if err := validatePoolResource(&pod.Spec.Containers[i], request, limit); err != nil {
 			return toAdmissionResponse(err)
 		}
 	}
 
-	ops = append(containerOps, initContainerOps...)
-
 	if len(ops) > 0 {
-		reviewResponse.Patch = []byte("[ " + strings.Join(ops, ",") + " ]")
+		str := "[ " + strings.Join(ops, ",") + " ]"
+		glog.V(2).Infof("patch: %s", str)
+		reviewResponse.Patch = []byte(str)
 		pt := v1beta1.PatchTypeJSONPatch
 		reviewResponse.PatchType = &pt
 	}
@@ -371,7 +356,7 @@ func serve(w http.ResponseWriter, r *http.Request, admit admitFunc) {
 			reviewResponse = admit(ar)
 		}
 	}
-	glog.V(2).Info(fmt.Sprintf("sending response: %v", reviewResponse))
+	// glog.V(2).Info(fmt.Sprintf("sending response: %v", reviewResponse))
 
 	response := v1beta1.AdmissionReview{}
 	if reviewResponse != nil {
@@ -430,7 +415,7 @@ func main() {
 
 	http.HandleFunc("/pods", servePods)
 
-	glog.V(2).Info("Webhook v2 started")
+	glog.V(2).Info("Webhook started")
 
 	server := &http.Server{
 		Addr:      ":443",
