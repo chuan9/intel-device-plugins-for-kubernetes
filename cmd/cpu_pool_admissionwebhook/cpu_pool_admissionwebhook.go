@@ -42,13 +42,12 @@ const (
 	resourcePrefix = "intel.com/cpupool."
 
 	// defaultPool has CPUs which are assigned to workloads which don't request specific pools
-	defaultPool = "default"
-
+	defaultPool   = "default"
 	addResourceOp = `{
                 "op": "add",
                 "path": "/spec/%s/%d/resources/%s/%s",
-                "value": %s
-        }`
+                "value": "%s"
+		}`
 )
 
 var (
@@ -196,7 +195,13 @@ func addPoolResourceRequestOrLimit(c *corev1.Container, request bool) (*poolReso
 		}, nil
 	}
 
+	if cpu == nil {
+		// no pool and no native CPU means no need to edit anything
+		return nil, nil
+	}
+
 	// only native CPU request/limit, add 'default' pool one
+
 	val := cpu.MilliValue()
 	pool = resource.NewQuantity(val, resource.DecimalSI)
 	name := corev1.ResourceName(resourcePrefix + defaultPool)
@@ -223,14 +228,19 @@ func addPoolResource(c *corev1.Container) (*poolResource, *poolResource, error) 
 	return request, limit, nil
 }
 
+func escapeName(name string) string {
+	str := strings.Replace(name, "~", "~0", -1)
+	return strings.Replace(str, "/", "~1", -1)
+}
+
 func createOp(res *poolResource, i int, resourceType string, target string) string {
 	resourceName := "cpu"
 
 	if !res.system {
-		resourceName = resourcePrefix + res.pool.String()
+		resourceName = res.pool.String()
 	}
 
-	return fmt.Sprintf(addResourceOp, target, i, resourceType, resourceName, res.quantity.String())
+	return fmt.Sprintf(addResourceOp, target, i, resourceType, escapeName(resourceName), res.quantity.String())
 }
 
 func mutatePods(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
